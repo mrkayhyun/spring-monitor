@@ -1,4 +1,6 @@
 bin/
+dist/
+sm
 *.exe
 *.test
 *.out
