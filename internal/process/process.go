@@ -117,10 +117,10 @@ func parseAppName(cmdline []string) string {
 		}
 	}
 
-	// 2. -jar <file.jar>
-	for _, arg := range cmdline {
-		if strings.HasSuffix(arg, ".jar") {
-			base := filepath.Base(arg)
+	// 2. -jar <file.jar>  (must be explicitly preceded by -jar flag)
+	for i, arg := range cmdline {
+		if arg == "-jar" && i+1 < len(cmdline) {
+			base := filepath.Base(cmdline[i+1])
 			name := strings.TrimSuffix(base, ".jar")
 			parts := strings.Split(name, "-")
 			var nameParts []string
@@ -177,9 +177,9 @@ func nameFromClasspath(cp string) string {
 }
 
 func parseJarFile(cmdline []string) string {
-	for _, arg := range cmdline {
-		if strings.HasSuffix(arg, ".jar") {
-			return arg
+	for i, arg := range cmdline {
+		if arg == "-jar" && i+1 < len(cmdline) {
+			return cmdline[i+1]
 		}
 	}
 	return ""
