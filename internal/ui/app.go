@@ -387,14 +387,11 @@ func (a *App) renderList() {
 	// ── Row 1: Header ──────────────────────────────────────────────────────
 	MoveTo(1, 1)
 	now := time.Now().Format("15:04:05")
-	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill  d:describe  r:refresh  ↑↓jk:nav", a.version)
 	right := fmt.Sprintf(" %s ", now)
-	gap := w - visibleLen(left) - visibleLen(right)
-	if gap < 0 {
-		gap = 0
-	}
-	header := BgBlue + Bold + White + left + strings.Repeat(" ", gap) + right + Reset
-	fmt.Print(header)
+	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill  d:describe  r:refresh  ↑↓jk:nav", a.version)
+	// padRight makes left exactly (w - len(right)) wide, so total = w
+	header := padRight(left, w-visibleLen(right)) + right
+	fmt.Print(BgBlue + Bold + White + header + Reset)
 
 	// ── Row 2: Column headers ───────────────────────────────────────────────
 	MoveTo(2, 1)
@@ -422,15 +419,12 @@ func (a *App) renderList() {
 
 	// ── Row h: Status bar ───────────────────────────────────────────────────
 	MoveTo(h, 1)
-	status := fmt.Sprintf(" %d Spring app(s) running", len(procs))
+	plain := fmt.Sprintf(" %d Spring app(s) running", len(procs))
 	if a.statusMsg != "" {
-		if a.statusErr {
-			status += "  │  " + Red + a.statusMsg + Reset
-		} else {
-			status += "  │  " + Green + a.statusMsg + Reset
-		}
+		plain += "  │  " + a.statusMsg
 	}
-	fmt.Print(BgBlack + White + padRight(status, w) + Reset)
+	// padRight on plain text first, then wrap entire line in colour
+	fmt.Print(BgBlack + White + padRight(plain, w) + Reset)
 }
 
 func (a *App) renderProcessRow(proc *process.SpringProcess, selected bool, w int) {
@@ -453,23 +447,22 @@ func (a *App) renderProcessRow(proc *process.SpringProcess, selected bool, w int
 		profile = "-"
 	}
 
-	// Plain fixed-width section
-	plain := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s ",
-		cursor, name, pid, ports, uptime, mem, java, profile)
-
-	// Coloured trailing fields (health + actuator)
-	health := healthStr(proc.HealthStatus)
-	act := actuatorStr(proc)
-	full := plain + fmt.Sprintf("%-8s  ", stripAnsi(healthStr(proc.HealthStatus))) // reserve space
-	// Replace trailing space block with coloured version
-	plain2 := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s ",
-		cursor, name, pid, ports, uptime, mem, java, profile)
-	full = plain2 + health + "  " + act
+	// Fixed-width plain section (no ANSI)
+	plain := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s %-8s  %-14s",
+		cursor, name, pid, ports, uptime, mem, java, profile,
+		stripAnsi(healthStr(proc.HealthStatus)),
+		stripAnsi(actuatorStr(proc)))
 
 	if selected {
-		fmt.Print(BgCyan + Bold + padRight(full, w) + Reset)
+		// Selected row: whole row gets BgCyan — use plain text only to avoid
+		// inner Reset codes cancelling the row background colour
+		fmt.Print(BgCyan + Bold + padRight(plain, w) + Reset)
 	} else {
-		fmt.Print(padRight(full, w))
+		// Normal row: colour health and actuator individually at the end
+		colored := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s %-8s  %s",
+			cursor, name, pid, ports, uptime, mem, java, profile,
+			healthStr(proc.HealthStatus), actuatorStr(proc))
+		fmt.Print(padRight(colored, w))
 	}
 }
 
