@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -220,35 +221,85 @@ func parseServerPort(cmdline []string) int {
 	return 0
 }
 
-// filterPorts returns only the ports that are declared in JVM/Spring arguments.
-// If no port is explicitly declared, all detected ports are returned as-is.
+// filterPorts resolves the actual Spring application ports without hardcoding.
 //
-// Recognised JVM args:
-//   -Dserver.port=X, --server.port=X
-//   -Dmanagement.server.port=X, --management.server.port=X
+// Strategy:
+//  1. If ports are explicitly declared via JVM/Spring args → use only those.
+//  2. Otherwise → HTTP-probe each detected port in parallel (200 ms timeout).
+//     Ports that respond with a valid HTTP response are real HTTP servers.
+//     JMX, debug agents, and other non-HTTP listeners are silently dropped.
+//  3. If nothing responds to HTTP → return all detected ports as fallback.
 func filterPorts(detected []int, cmdline []string) []int {
+	// Step 1: explicitly configured ports take priority
 	configured := parseDeclaredPorts(cmdline)
-	if len(configured) == 0 {
-		// No explicit config — return everything detected
-		return detected
+	if len(configured) > 0 {
+		configSet := make(map[int]bool, len(configured))
+		for _, p := range configured {
+			configSet[p] = true
+		}
+		var result []int
+		for _, p := range detected {
+			if configSet[p] {
+				result = append(result, p)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+		return configured
 	}
 
-	// Keep only the intersection of detected and explicitly configured ports
-	configSet := make(map[int]bool, len(configured))
-	for _, p := range configured {
-		configSet[p] = true
+	// Step 2: no declared ports — probe each one for HTTP
+	httpPorts := probeHTTPPorts(detected)
+	if len(httpPorts) > 0 {
+		return httpPorts
 	}
-	var result []int
-	for _, p := range detected {
-		if configSet[p] {
-			result = append(result, p)
+
+	// Step 3: fallback — nothing filtered
+	return detected
+}
+
+// probeHTTPPorts sends a GET / to each port in parallel and returns only
+// those that reply with a valid HTTP response within 200 ms.
+func probeHTTPPorts(ports []int) []int {
+	if len(ports) == 0 {
+		return nil
+	}
+
+	type result struct {
+		port int
+		ok   bool
+	}
+
+	probeClient := &http.Client{Timeout: 200 * time.Millisecond}
+	ch := make(chan result, len(ports))
+
+	for _, p := range ports {
+		go func(port int) {
+			resp, err := probeClient.Get(fmt.Sprintf("http://localhost:%d/", port))
+			if err == nil {
+				resp.Body.Close()
+				ch <- result{port, true}
+			} else {
+				ch <- result{port, false}
+			}
+		}(p)
+	}
+
+	okSet := make(map[int]bool, len(ports))
+	for range ports {
+		r := <-ch
+		okSet[r.port] = r.ok
+	}
+
+	// Preserve original order
+	var httpPorts []int
+	for _, p := range ports {
+		if okSet[p] {
+			httpPorts = append(httpPorts, p)
 		}
 	}
-	if len(result) > 0 {
-		return result
-	}
-	// Configured but not yet listening (e.g., still starting up) — show configured
-	return configured
+	return httpPorts
 }
 
 // parseDeclaredPorts extracts every port number explicitly set via JVM / Spring Boot arguments.
