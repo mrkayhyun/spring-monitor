@@ -1,4 +1,4 @@
-module github.com/mrkayhyun/scrapling-go
+module github.com/mrkayhyun/goscrape
 
 go 1.22
 

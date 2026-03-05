@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	scrapling "github.com/mrkayhyun/scrapling-go"
+	scrapling "github.com/mrkayhyun/goscrape"
 )
 
 func main() {
