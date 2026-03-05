@@ -1,0 +1,56 @@
+version: 2
+
+project_name: sm
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: sm
+    main: ./cmd/sm
+    binary: sm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: sm
+    name_template: "sm_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    files:
+      - README.md
+      - README.en.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: sm
+    repository:
+      owner: mrkayhyun
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/mrkayhyun/spring-monitor"
+    description: "k9s-style TUI for monitoring and managing Spring Boot applications"
+    license: "MIT"
+    install: |
+      bin.install "sm"
+    test: |
+      system "#{bin}/sm", "--version"
