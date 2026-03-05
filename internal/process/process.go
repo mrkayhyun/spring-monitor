@@ -220,35 +220,58 @@ func parseServerPort(cmdline []string) int {
 	return 0
 }
 
-// filterPorts removes noise ports from the detected port list.
-// Keeps only ports that are likely to be actual Spring HTTP/management ports.
+// filterPorts returns only the ports that are declared in JVM/Spring arguments.
+// If no port is explicitly declared, all detected ports are returned as-is.
 //
-// Filtered out:
-//   - 35729: Spring DevTools LiveReload
-//   - Ephemeral ports (>32767) unless explicitly declared via JVM args
-func filterPorts(ports []int, cmdline []string) []int {
-	// Collect explicitly configured ports from JVM args
-	known := make(map[int]bool)
-	if p := parseServerPort(cmdline); p > 0 {
-		known[p] = true
-	}
-	if p := parseActuatorPort(cmdline); p > 0 {
-		known[p] = true
+// Recognised JVM args:
+//   -Dserver.port=X, --server.port=X
+//   -Dmanagement.server.port=X, --management.server.port=X
+func filterPorts(detected []int, cmdline []string) []int {
+	configured := parseDeclaredPorts(cmdline)
+	if len(configured) == 0 {
+		// No explicit config — return everything detected
+		return detected
 	}
 
-	var result []int
-	for _, port := range ports {
-		// Always drop LiveReload
-		if port == 35729 {
-			continue
-		}
-		// Drop high ephemeral ports unless explicitly in JVM args
-		if port > 32767 && !known[port] {
-			continue
-		}
-		result = append(result, port)
+	// Keep only the intersection of detected and explicitly configured ports
+	configSet := make(map[int]bool, len(configured))
+	for _, p := range configured {
+		configSet[p] = true
 	}
-	return result
+	var result []int
+	for _, p := range detected {
+		if configSet[p] {
+			result = append(result, p)
+		}
+	}
+	if len(result) > 0 {
+		return result
+	}
+	// Configured but not yet listening (e.g., still starting up) — show configured
+	return configured
+}
+
+// parseDeclaredPorts extracts every port number explicitly set via JVM / Spring Boot arguments.
+func parseDeclaredPorts(cmdline []string) []int {
+	prefixes := []string{
+		"-Dserver.port=",
+		"--server.port=",
+		"-Dmanagement.server.port=",
+		"--management.server.port=",
+	}
+	seen := make(map[int]bool)
+	var ports []int
+	for _, arg := range cmdline {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(arg, prefix) {
+				if p, err := strconv.Atoi(strings.TrimPrefix(arg, prefix)); err == nil && !seen[p] {
+					seen[p] = true
+					ports = append(ports, p)
+				}
+			}
+		}
+	}
+	return ports
 }
 
 func parseActuatorBasePath(cmdline []string) string {
