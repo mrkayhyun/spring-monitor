@@ -67,6 +67,9 @@ func scanProcess(pid int, socketInodes map[uint64]int) (*SpringProcess, error) {
 		LogFile:          parseLogFile(cmdline),
 		ActuatorPort:     parseActuatorPort(cmdline),
 		ActuatorBasePath: parseActuatorBasePath(cmdline),
+		Profiles:         parseProfiles(cmdline),
+		JavaVersion:      parseJavaVersion(cmdline),
+		XmxMB:            parseXmx(cmdline),
 	}
 
 	if wd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid)); err == nil {
@@ -146,13 +149,18 @@ func fillProcInfo(proc *SpringProcess) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "VmRSS:") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
+			if parts := strings.Fields(line); len(parts) >= 2 {
 				if kb, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
 					proc.MemoryMB = kb / 1024
 				}
 			}
-			break
+		}
+		if strings.HasPrefix(line, "Threads:") {
+			if parts := strings.Fields(line); len(parts) >= 2 {
+				if t, err := strconv.Atoi(parts[1]); err == nil {
+					proc.Threads = t
+				}
+			}
 		}
 	}
 }

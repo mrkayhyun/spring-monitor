@@ -53,6 +53,10 @@ func Scan() ([]*SpringProcess, error) {
 			ActuatorBasePath: parseActuatorBasePath(cmdline),
 			MemoryMB:         rssKB / 1024,
 			StartTime:        approximateStartTime(pid),
+			Profiles:         parseProfiles(cmdline),
+			JavaVersion:      parseJavaVersion(cmdline),
+			XmxMB:            parseXmx(cmdline),
+			Threads:          getThreadCountDarwin(pid),
 		}
 
 		proc.Ports = filterPorts(getPortsDarwin(pid), cmdline)
@@ -73,6 +77,18 @@ func isSpringCmd(cmdStr string) bool {
 		}
 	}
 	return false
+}
+
+func getThreadCountDarwin(pid int) int {
+	out, err := exec.Command("ps", "-o", "thcount=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0
+	}
+	t, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return t
 }
 
 func approximateStartTime(pid int) time.Time {

@@ -33,6 +33,13 @@ type SpringProcess struct {
 	ActuatorPort     int
 	ActuatorStatus   ActuatorStatus
 	ActuatorBasePath string
+
+	// Additional info
+	Profiles     string // active spring profiles, e.g. "dev,mysql"
+	JavaVersion  string // e.g. "11", "17", "21"
+	XmxMB        int64  // max heap in MB (0 = not set)
+	Threads      int    // thread count
+	HealthStatus string // "UP", "DOWN", "OUT_OF_SERVICE", "" = unchecked
 }
 
 func (p *SpringProcess) Uptime() string {
@@ -207,6 +214,97 @@ func parseActuatorPort(cmdline []string) int {
 		}
 	}
 	return 0
+}
+
+// parseProfiles extracts active Spring profiles from JVM/Spring Boot arguments
+func parseProfiles(cmdline []string) string {
+	for _, arg := range cmdline {
+		for _, prefix := range []string{"-Dspring.profiles.active=", "--spring.profiles.active="} {
+			if strings.HasPrefix(arg, prefix) {
+				return strings.TrimPrefix(arg, prefix)
+			}
+		}
+	}
+	return ""
+}
+
+// parseJavaVersion extracts the Java major version from the JVM binary path
+// e.g. .../microsoft-11.jdk/... → "11", .../jdk-17/... → "17"
+func parseJavaVersion(cmdline []string) string {
+	if len(cmdline) == 0 {
+		return ""
+	}
+	binary := strings.ToLower(cmdline[0])
+
+	// Patterns that precede the version number in common JDK directory names
+	for _, marker := range []string{
+		"jdk-", "jdk", "java-", "openjdk-", "openjdk",
+		"temurin-", "microsoft-", "adoptopenjdk-", "corretto-", "graalvm-",
+	} {
+		idx := strings.Index(binary, marker)
+		if idx < 0 {
+			continue
+		}
+		rest := binary[idx+len(marker):]
+		var ver strings.Builder
+		for _, r := range rest {
+			if r >= '0' && r <= '9' {
+				ver.WriteRune(r)
+			} else if ver.Len() > 0 {
+				break
+			}
+		}
+		// Skip "1.8" style — return "8"
+		if ver.String() == "1" {
+			continue
+		}
+		if ver.Len() > 0 {
+			return ver.String()
+		}
+	}
+	return ""
+}
+
+// parseXmx extracts the max heap size in MB from -Xmx or -XX:MaxHeapSize
+func parseXmx(cmdline []string) int64 {
+	for _, arg := range cmdline {
+		if strings.HasPrefix(arg, "-Xmx") {
+			return parseJVMMemory(strings.TrimPrefix(arg, "-Xmx"))
+		}
+		if strings.HasPrefix(arg, "-XX:MaxHeapSize=") {
+			return parseJVMMemory(strings.TrimPrefix(arg, "-XX:MaxHeapSize="))
+		}
+	}
+	return 0
+}
+
+// parseJVMMemory converts JVM memory strings like "512m", "2g", "1024k" to MB
+func parseJVMMemory(s string) int64 {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) == 0 {
+		return 0
+	}
+	unit := s[len(s)-1]
+	numStr := s[:len(s)-1]
+	n, err := strconv.ParseInt(numStr, 10, 64)
+	if err != nil {
+		return 0
+	}
+	switch unit {
+	case 'g':
+		return n * 1024
+	case 'm':
+		return n
+	case 'k':
+		return n / 1024
+	default:
+		// plain bytes
+		fullNum, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return fullNum / (1024 * 1024)
+	}
 }
 
 // parseServerPort extracts -Dserver.port= from JVM arguments

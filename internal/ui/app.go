@@ -93,18 +93,27 @@ func (a *App) Run(initialProcs []*process.SpringProcess) {
 		}
 	}()
 
-	// Background process refresh every 5 seconds
+	// Background process refresh every 5 seconds (with actuator health checks)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			if procs, err := process.Scan(); err == nil {
-				select {
-				case procRefreshCh <- procs:
-				default:
-				}
+			procs, err := process.Scan()
+			if err != nil {
+				continue
+			}
+			enrichWithActuator(procs)
+			select {
+			case procRefreshCh <- procs:
+			default:
 			}
 		}
+	}()
+
+	// Also enrich initial processes with actuator health in background
+	go func() {
+		enrichWithActuator(initialProcs)
+		a.render()
 	}()
 
 	a.render()
@@ -389,8 +398,8 @@ func (a *App) renderList() {
 
 	// ── Row 2: Column headers ───────────────────────────────────────────────
 	MoveTo(2, 1)
-	colHeader := fmt.Sprintf("  %-24s %-7s %-14s %-10s %-8s  %s",
-		"NAME", "PID", "PORT(S)", "UPTIME", "MEM(MB)", "ACTUATOR")
+	colHeader := fmt.Sprintf("  %-20s %-7s %-10s %-8s %-7s %-5s %-10s %-8s  %s",
+		"NAME", "PID", "PORT(S)", "UPTIME", "MEM(MB)", "JAVA", "PROFILE", "HEALTH", "ACTUATOR")
 	fmt.Print(BgGray + Bold + padRight(colHeader, w) + Reset)
 
 	// ── Rows 3..h-1: Process rows ───────────────────────────────────────────
@@ -425,25 +434,37 @@ func (a *App) renderList() {
 }
 
 func (a *App) renderProcessRow(proc *process.SpringProcess, selected bool, w int) {
-	// Build actuator indicator (plain text, no ANSI inside padded region)
-	actuatorStr := actuatorStr(proc)
-
-	// Plain-text fields
-	name := truncate(proc.Name, 24)
-	pid := fmt.Sprintf("%d", proc.PID)
-	ports := truncate(proc.PortsString(), 14)
-	uptime := proc.Uptime()
-	mem := fmt.Sprintf("%d", proc.MemoryMB)
-
 	cursor := "  "
 	if selected {
 		cursor = " ▶"
 	}
 
-	// Build row (actuator at the end, may have ANSI)
-	plain := fmt.Sprintf("%s %-24s %-7s %-14s %-10s %-8s  ",
-		cursor, name, pid, ports, uptime, mem)
-	full := plain + actuatorStr
+	name := truncate(proc.Name, 20)
+	pid := fmt.Sprintf("%d", proc.PID)
+	ports := truncate(proc.PortsString(), 10)
+	uptime := truncate(proc.Uptime(), 8)
+	mem := fmt.Sprintf("%d", proc.MemoryMB)
+	java := proc.JavaVersion
+	if java == "" {
+		java = "-"
+	}
+	profile := truncate(proc.Profiles, 10)
+	if profile == "" {
+		profile = "-"
+	}
+
+	// Plain fixed-width section
+	plain := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s ",
+		cursor, name, pid, ports, uptime, mem, java, profile)
+
+	// Coloured trailing fields (health + actuator)
+	health := healthStr(proc.HealthStatus)
+	act := actuatorStr(proc)
+	full := plain + fmt.Sprintf("%-8s  ", stripAnsi(healthStr(proc.HealthStatus))) // reserve space
+	// Replace trailing space block with coloured version
+	plain2 := fmt.Sprintf("%s %-20s %-7s %-10s %-8s %-7s %-5s %-10s ",
+		cursor, name, pid, ports, uptime, mem, java, profile)
+	full = plain2 + health + "  " + act
 
 	if selected {
 		fmt.Print(BgCyan + Bold + padRight(full, w) + Reset)
@@ -452,15 +473,30 @@ func (a *App) renderProcessRow(proc *process.SpringProcess, selected bool, w int
 	}
 }
 
+func healthStr(status string) string {
+	switch status {
+	case "UP":
+		return Green + "UP" + Reset
+	case "DOWN":
+		return Red + "DOWN" + Reset
+	case "OUT_OF_SERVICE":
+		return Yellow + "OOS" + Reset
+	case "UNKNOWN":
+		return Yellow + "UNK" + Reset
+	default:
+		return Dim + "-" + Reset
+	}
+}
+
 func actuatorStr(proc *process.SpringProcess) string {
 	switch proc.ActuatorStatus {
 	case process.ActuatorEnabled:
-		return Green + fmt.Sprintf("✓  :%d", proc.ActuatorPort) + Reset
+		return Green + fmt.Sprintf("✓ :%d", proc.ActuatorPort) + Reset
 	case process.ActuatorDisabled:
 		return Red + "✗" + Reset
 	default:
 		if proc.ActuatorPort > 0 {
-			return Yellow + fmt.Sprintf("?  :%d", proc.ActuatorPort) + Reset
+			return Yellow + fmt.Sprintf("? :%d", proc.ActuatorPort) + Reset
 		}
 		return Dim + "-" + Reset
 	}
@@ -499,17 +535,35 @@ func (a *App) renderDescribe() {
 	}
 
 	printSection("Process")
-	printField("Name:", proc.Name)
+	printField("Name:", Bold+proc.Name+Reset)
 	printField("PID:", fmt.Sprintf("%d", proc.PID))
+	if proc.JavaVersion != "" {
+		printField("Java:", "Java "+proc.JavaVersion)
+	}
+	if proc.Profiles != "" {
+		printField("Profiles:", Cyan+proc.Profiles+Reset)
+	} else {
+		printField("Profiles:", Dim+"(none / default)"+Reset)
+	}
+	printField("Port(s):", proc.PortsString())
+	printField("Uptime:", proc.Uptime())
+	printField("Started:", proc.StartTime.Format("2006-01-02 15:04:05"))
+
+	memStr := fmt.Sprintf("%d MB (RSS)", proc.MemoryMB)
+	if proc.XmxMB > 0 {
+		memStr += fmt.Sprintf("  │  Xmx: %d MB", proc.XmxMB)
+	}
+	printField("Memory:", memStr)
+
+	if proc.Threads > 0 {
+		printField("Threads:", fmt.Sprintf("%d", proc.Threads))
+	}
 	if proc.JarFile != "" {
 		printField("JAR:", truncate(proc.JarFile, w-24))
 	}
 	if proc.WorkingDir != "" {
 		printField("Working Dir:", truncate(proc.WorkingDir, w-24))
 	}
-	printField("Port(s):", proc.PortsString())
-	printField("Uptime:", proc.Uptime())
-	printField("Memory:", fmt.Sprintf("%d MB (RSS)", proc.MemoryMB))
 	if lf := proc.FindLogFile(); lf != "" {
 		printField("Log File:", truncate(lf, w-24))
 	} else {
@@ -524,16 +578,20 @@ func (a *App) renderDescribe() {
 		printField("URL:", url)
 		switch proc.ActuatorStatus {
 		case process.ActuatorEnabled:
+			healthVal := proc.HealthStatus
+			if healthVal == "" {
+				healthVal = "checking..."
+			}
 			printField("Status:", Green+"✓ Enabled"+Reset)
+			printField("Health:", healthStr(proc.HealthStatus))
 		case process.ActuatorDisabled:
 			printField("Status:", Red+"✗ Not available"+Reset)
 		default:
-			printField("Status:", Yellow+"? Probing... (press d again)"+Reset)
+			printField("Status:", Yellow+"? Probing..."+Reset)
 		}
 	}
 
 	printSection("Command Line")
-	// Show command line (wrapped)
 	cmdStr := strings.Join(proc.CmdLine, " ")
 	maxCmdW := w - 4
 	for len(cmdStr) > 0 && row < h-1 {
@@ -620,4 +678,32 @@ func (a *App) renderKill() {
 	// Status bar
 	MoveTo(h, 1)
 	fmt.Print(BgBlack + White + padRight(" Choose an action or ESC to cancel", w) + Reset)
+}
+
+// enrichWithActuator probes Spring Actuator for each process in parallel
+// and updates ActuatorStatus and HealthStatus fields.
+func enrichWithActuator(procs []*process.SpringProcess) {
+	var wg sync.WaitGroup
+	for _, proc := range procs {
+		url := proc.ActuatorURL()
+		if url == "" {
+			proc.ActuatorStatus = process.ActuatorDisabled
+			continue
+		}
+		wg.Add(1)
+		go func(p *process.SpringProcess, u string) {
+			defer wg.Done()
+			info, _ := actuator.Check(u)
+			if info == nil {
+				return
+			}
+			if info.Available {
+				p.ActuatorStatus = process.ActuatorEnabled
+				p.HealthStatus = info.Health
+			} else {
+				p.ActuatorStatus = process.ActuatorDisabled
+			}
+		}(proc, url)
+	}
+	wg.Wait()
 }
