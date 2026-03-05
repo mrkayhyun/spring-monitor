@@ -55,7 +55,7 @@ func Scan() ([]*SpringProcess, error) {
 			StartTime:        approximateStartTime(pid),
 		}
 
-		proc.Ports = getPortsDarwin(pid)
+		proc.Ports = filterPorts(getPortsDarwin(pid), cmdline)
 		if proc.ActuatorPort == 0 && len(proc.Ports) > 0 {
 			proc.ActuatorPort = proc.Ports[0]
 		}

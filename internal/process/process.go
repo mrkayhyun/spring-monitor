@@ -208,6 +208,49 @@ func parseActuatorPort(cmdline []string) int {
 	return 0
 }
 
+// parseServerPort extracts -Dserver.port= from JVM arguments
+func parseServerPort(cmdline []string) int {
+	for _, arg := range cmdline {
+		if strings.HasPrefix(arg, "-Dserver.port=") {
+			if port, err := strconv.Atoi(strings.TrimPrefix(arg, "-Dserver.port=")); err == nil {
+				return port
+			}
+		}
+	}
+	return 0
+}
+
+// filterPorts removes noise ports from the detected port list.
+// Keeps only ports that are likely to be actual Spring HTTP/management ports.
+//
+// Filtered out:
+//   - 35729: Spring DevTools LiveReload
+//   - Ephemeral ports (>32767) unless explicitly declared via JVM args
+func filterPorts(ports []int, cmdline []string) []int {
+	// Collect explicitly configured ports from JVM args
+	known := make(map[int]bool)
+	if p := parseServerPort(cmdline); p > 0 {
+		known[p] = true
+	}
+	if p := parseActuatorPort(cmdline); p > 0 {
+		known[p] = true
+	}
+
+	var result []int
+	for _, port := range ports {
+		// Always drop LiveReload
+		if port == 35729 {
+			continue
+		}
+		// Drop high ephemeral ports unless explicitly in JVM args
+		if port > 32767 && !known[port] {
+			continue
+		}
+		result = append(result, port)
+	}
+	return result
+}
+
 func parseActuatorBasePath(cmdline []string) string {
 	for _, arg := range cmdline {
 		if strings.HasPrefix(arg, "-Dmanagement.endpoints.web.base-path=") {

@@ -75,7 +75,7 @@ func scanProcess(pid int, socketInodes map[uint64]int) (*SpringProcess, error) {
 
 	fillProcInfo(proc)
 
-	proc.Ports = getProcessPorts(pid, socketInodes)
+	proc.Ports = filterPorts(getProcessPorts(pid, socketInodes), cmdline)
 
 	if proc.ActuatorPort == 0 && len(proc.Ports) > 0 {
 		proc.ActuatorPort = proc.Ports[0]
