@@ -103,13 +103,21 @@ func (p *SpringProcess) FindLogFile() string {
 	return ""
 }
 
-// parseAppName extracts application name from JVM arguments
+// parseAppName extracts application name from JVM arguments.
+// Priority:
+//  1. -Dspring.application.name=<name>
+//  2. -jar <file.jar>  → jar filename without version suffix
+//  3. -classpath / -cp → project dir extracted from .../target/classes path
+//  4. Main class arg   → last non-flag dotted token, stripped of "Application"/"App"
 func parseAppName(cmdline []string) string {
+	// 1. Explicit spring app name
 	for _, arg := range cmdline {
 		if strings.HasPrefix(arg, "-Dspring.application.name=") {
 			return strings.TrimPrefix(arg, "-Dspring.application.name=")
 		}
 	}
+
+	// 2. -jar <file.jar>
 	for _, arg := range cmdline {
 		if strings.HasSuffix(arg, ".jar") {
 			base := filepath.Base(arg)
@@ -128,7 +136,44 @@ func parseAppName(cmdline []string) string {
 			return name
 		}
 	}
+
+	// 3. -classpath / -cp: find .../target/classes or .../build/classes
+	for i, arg := range cmdline {
+		if (arg == "-classpath" || arg == "-cp") && i+1 < len(cmdline) {
+			if name := nameFromClasspath(cmdline[i+1]); name != "" {
+				return name
+			}
+		}
+	}
+
+	// 4. Main class: last non-flag argument with dots (e.g. com.example.MyApplication)
+	for i := len(cmdline) - 1; i >= 0; i-- {
+		arg := cmdline[i]
+		if !strings.HasPrefix(arg, "-") && strings.Contains(arg, ".") {
+			parts := strings.Split(arg, ".")
+			simple := parts[len(parts)-1]
+			simple = strings.TrimSuffix(simple, "Application")
+			simple = strings.TrimSuffix(simple, "App")
+			if simple != "" {
+				return strings.ToLower(simple)
+			}
+		}
+	}
+
 	return "unknown"
+}
+
+// nameFromClasspath scans a colon-separated classpath for a project directory.
+// Returns the parent folder name of the first .../target/classes or .../build/classes entry.
+func nameFromClasspath(cp string) string {
+	for _, entry := range strings.Split(cp, ":") {
+		for _, marker := range []string{"/target/classes", "/build/classes"} {
+			if idx := strings.LastIndex(entry, marker); idx >= 0 {
+				return filepath.Base(entry[:idx])
+			}
+		}
+	}
+	return ""
 }
 
 func parseJarFile(cmdline []string) string {
