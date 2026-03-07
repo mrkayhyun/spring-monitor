@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -313,8 +314,61 @@ func (a *App) handleKillKey(key int) bool {
 			a.killTarget = nil
 			a.killInfo = nil
 		}
+
+	case 'R': // Restart
+		if proc != nil {
+			target := proc
+			a.state = stateList
+			a.killTarget = nil
+			a.killInfo = nil
+			a.setStatus(fmt.Sprintf("[%s] Restarting...", target.Name), false)
+			go a.restartProcess(target)
+		}
 	}
 	return true
+}
+
+func (a *App) restartProcess(proc *process.SpringProcess) {
+	if len(proc.CmdLine) == 0 {
+		a.setStatus(fmt.Sprintf("[%s] Restart failed: no command line info", proc.Name), true)
+		a.render()
+		return
+	}
+
+	// Send SIGTERM
+	p, err := os.FindProcess(proc.PID)
+	if err != nil {
+		a.setStatus(fmt.Sprintf("[%s] Restart failed: %v", proc.Name, err), true)
+		a.render()
+		return
+	}
+	p.Signal(syscall.SIGTERM)
+
+	// Wait up to 10s for process to exit
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", proc.PID)); os.IsNotExist(err) {
+			break
+		}
+	}
+
+	// Force kill if still alive
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", proc.PID)); err == nil {
+		p.Signal(syscall.SIGKILL)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Re-launch with same command line
+	cmd := exec.Command(proc.CmdLine[0], proc.CmdLine[1:]...)
+	cmd.Dir = proc.WorkingDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		a.setStatus(fmt.Sprintf("[%s] Restart failed: %v", proc.Name, err), true)
+	} else {
+		a.setStatus(fmt.Sprintf("[%s] Restarted (new PID: %d)", proc.Name, cmd.Process.Pid), false)
+	}
+	a.render()
 }
 
 func (a *App) openLog(proc *process.SpringProcess) {
@@ -378,7 +432,7 @@ func (a *App) renderList() {
 	// ── Row 1: Header ──────────────────────────────────────────────────────
 	MoveTo(1, 1)
 	now := time.Now().Format("15:04:05")
-	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill  d:describe  r:refresh  ↑↓jk:nav", a.version)
+	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill/restart  d:describe  r:refresh  ↑↓jk:nav", a.version)
 	right := fmt.Sprintf(" %s ", now)
 	gap := w - visibleLen(left) - visibleLen(right)
 	if gap < 0 {
@@ -614,6 +668,7 @@ func (a *App) renderKill() {
 	}
 	print(Yellow + "[t]" + Reset + " SIGTERM            (request graceful terminate)")
 	print(Red + "[K]" + Reset + " SIGKILL            (force kill - no cleanup)")
+	print(Cyan + "[R]" + Reset + " Restart            (SIGTERM → wait → re-launch)")
 	row++
 	print(Dim + "[ESC/c] Cancel" + Reset)
 
