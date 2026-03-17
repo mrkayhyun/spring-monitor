@@ -98,9 +98,13 @@ func isSpringProcess(cmdline []string) bool {
 		return false
 	}
 
-	cmdStr := strings.ToLower(strings.Join(cmdline, " "))
+	cmdStr := strings.Join(cmdline, " ")
+	if isKnownNonSpringJava(cmdStr) {
+		return false
+	}
+	lower := strings.ToLower(cmdStr)
 	for _, ind := range []string{"spring", "-dspring", "org.springframework", "-jar"} {
-		if strings.Contains(cmdStr, ind) {
+		if strings.Contains(lower, ind) {
 			return true
 		}
 	}

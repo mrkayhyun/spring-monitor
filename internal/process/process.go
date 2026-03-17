@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+// isKnownNonSpringJava returns true for well-known Java tools that are not Spring apps.
+func isKnownNonSpringJava(cmdStr string) bool {
+	lower := strings.ToLower(cmdStr)
+	for _, excl := range []string{
+		"eclipse.equinox",
+		"eclipse.application",
+		"org.eclipse.jdt",
+		"com.intellij",
+		"org.gradle",
+		"kotlin.daemon",
+		"jmeter",
+	} {
+		if strings.Contains(lower, excl) {
+			return true
+		}
+	}
+	return false
+}
+
 // ActuatorStatus represents Spring Actuator availability
 type ActuatorStatus int
 
@@ -92,9 +111,13 @@ func (p *SpringProcess) FindLogFile() string {
 	if p.WorkingDir != "" {
 		candidates = append(candidates,
 			filepath.Join(p.WorkingDir, "logs", p.Name+".log"),
+			filepath.Join(p.WorkingDir, "logs", p.Name+".info.log"),
+			filepath.Join(p.WorkingDir, "logs", p.Name+".error.log"),
+			filepath.Join(p.WorkingDir, "logs", p.Name+".debug.log"),
 			filepath.Join(p.WorkingDir, "logs", "application.log"),
 			filepath.Join(p.WorkingDir, "logs", "spring.log"),
 			filepath.Join(p.WorkingDir, p.Name+".log"),
+			filepath.Join(p.WorkingDir, p.Name+".info.log"),
 			filepath.Join(p.WorkingDir, "application.log"),
 		)
 	}
@@ -127,8 +150,20 @@ func parseAppName(cmdline []string) string {
 
 	// 2. -jar <file.jar>  (must be explicitly preceded by -jar flag)
 	for i, arg := range cmdline {
-		if arg == "-jar" && i+1 < len(cmdline) {
-			base := filepath.Base(cmdline[i+1])
+		if arg == "-jar" {
+			// Skip any JVM flags that appear between -jar and the actual JAR path
+			// e.g. "java -jar -Xms1024m -Xmx1024m app.jar"
+			jarArg := ""
+			for j := i + 1; j < len(cmdline); j++ {
+				if !strings.HasPrefix(cmdline[j], "-") {
+					jarArg = cmdline[j]
+					break
+				}
+			}
+			if jarArg == "" {
+				break
+			}
+			base := filepath.Base(jarArg)
 			name := strings.TrimSuffix(base, ".jar")
 			parts := strings.Split(name, "-")
 			var nameParts []string
@@ -186,8 +221,12 @@ func nameFromClasspath(cp string) string {
 
 func parseJarFile(cmdline []string) string {
 	for i, arg := range cmdline {
-		if arg == "-jar" && i+1 < len(cmdline) {
-			return cmdline[i+1]
+		if arg == "-jar" {
+			for j := i + 1; j < len(cmdline); j++ {
+				if !strings.HasPrefix(cmdline[j], "-") {
+					return cmdline[j]
+				}
+			}
 		}
 	}
 	return ""

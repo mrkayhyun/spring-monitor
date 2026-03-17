@@ -59,6 +59,7 @@ func Scan() ([]*SpringProcess, error) {
 			Threads:          getThreadCountDarwin(pid),
 		}
 
+		proc.WorkingDir = getWorkingDirDarwin(pid)
 		proc.Ports = filterPorts(getPortsDarwin(pid), cmdline)
 		if proc.ActuatorPort == 0 && len(proc.Ports) > 0 {
 			proc.ActuatorPort = proc.Ports[0]
@@ -70,6 +71,9 @@ func Scan() ([]*SpringProcess, error) {
 }
 
 func isSpringCmd(cmdStr string) bool {
+	if isKnownNonSpringJava(cmdStr) {
+		return false
+	}
 	lower := strings.ToLower(cmdStr)
 	for _, ind := range []string{"spring", "-dspring", "-jar", "org.springframework"} {
 		if strings.Contains(lower, ind) {
@@ -106,6 +110,19 @@ func approximateStartTime(pid int) time.Time {
 		}
 	}
 	return t
+}
+
+func getWorkingDirDarwin(pid int) string {
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return strings.TrimPrefix(line, "n")
+		}
+	}
+	return ""
 }
 
 func getPortsDarwin(pid int) []int {
