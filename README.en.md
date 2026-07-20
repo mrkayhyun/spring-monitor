@@ -105,6 +105,8 @@ Probes `GET /actuator` on the detected management port:
 - Returns `✓` if Actuator is reachable
 - Checks for `/actuator/shutdown` endpoint availability
 - Shows health status from `/actuator/health`
+- Shows JVM heap/threads and HTTP request/5xx/average latency metrics in the describe view
+- Shows version, build, and Git metadata from `/actuator/info`
 
 ### Log File Discovery
 
@@ -135,7 +137,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,shutdown
+        include: health,info,metrics,shutdown
   endpoint:
     shutdown:
       enabled: true           # enables graceful shutdown endpoint
@@ -148,7 +150,7 @@ server:
 
 ## Roadmap
 
-- [ ] Actuator metrics dashboard (heap, threads, HTTP stats)
+- [x] Actuator metrics dashboard (heap, threads, HTTP stats)
 - [ ] Health check indicator with auto-refresh
 - [ ] SSH remote monitoring
 - [ ] systemd integration (`journalctl` log support)

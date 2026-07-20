@@ -107,6 +107,8 @@ make install              # /usr/local/bin/sm 으로 설치
 - 응답 성공 시 `✓` (Actuator 활성)
 - `/actuator/shutdown` 엔드포인트 존재 여부 확인
 - `/actuator/health`로 헬스 상태 표시
+- 상세 화면에서 JVM 힙·스레드와 HTTP 요청/5xx/평균 응답시간 표시
+- `/actuator/info`의 버전·빌드·Git 정보 표시
 
 ### 로그 파일 탐색
 
@@ -139,7 +141,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,shutdown
+        include: health,info,metrics,shutdown
   endpoint:
     shutdown:
       enabled: true           # Graceful shutdown 엔드포인트 활성화
@@ -152,7 +154,7 @@ server:
 
 ## 로드맵
 
-- [ ] Actuator 메트릭 대시보드 (heap, thread, HTTP 통계)
+- [x] Actuator 메트릭 대시보드 (heap, thread, HTTP 통계)
 - [ ] 헬스 체크 자동 갱신 표시
 - [ ] SSH 원격 서버 모니터링
 - [ ] systemd 연동 (`journalctl` 로그 지원)

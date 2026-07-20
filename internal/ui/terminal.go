@@ -10,24 +10,25 @@ import (
 
 // ANSI escape codes
 const (
-	Reset   = "\033[0m"
-	Bold    = "\033[1m"
-	Dim     = "\033[2m"
-	Red     = "\033[31m"
-	Green   = "\033[32m"
-	Yellow  = "\033[33m"
-	Blue    = "\033[34m"
-	Cyan    = "\033[36m"
-	White   = "\033[37m"
-	BgBlue  = "\033[44m"
-	BgCyan  = "\033[46m"
-	BgBlack = "\033[40m"
-	BgGray  = "\033[100m"
+	Reset     = "\033[0m"
+	Bold      = "\033[1m"
+	Dim       = "\033[2m"
+	Underline = "\033[4m"
+	Red       = "\033[31m"
+	Green     = "\033[32m"
+	Yellow    = "\033[33m"
+	Blue      = "\033[34m"
+	Cyan      = "\033[36m"
+	White     = "\033[37m"
+	BgBlue    = "\033[44m"
+	BgCyan    = "\033[46m"
+	BgBlack   = "\033[40m"
+	BgGray    = "\033[100m"
 )
 
 // Special key codes (beyond ASCII range)
 const (
-	KeyUp    = 1000 + iota
+	KeyUp = 1000 + iota
 	KeyDown
 	KeyLeft
 	KeyRight
@@ -125,8 +126,24 @@ func ReadKey() int {
 	return int(buf[0])
 }
 
-// visibleLen returns the display length of a string, ignoring ANSI codes
-// and treating each rune as 1 column (adequate for ASCII + common Unicode)
+// isWideChar reports whether r occupies 2 terminal columns (East Asian wide chars).
+func isWideChar(r rune) bool {
+	return (r >= 0x1100 && r <= 0x115F) ||
+		(r >= 0x2E80 && r <= 0x303E) ||
+		(r >= 0x3040 && r <= 0x33FF) ||
+		(r >= 0x3400 && r <= 0x4DBF) ||
+		(r >= 0x4E00 && r <= 0x9FFF) ||
+		(r >= 0xA000 && r <= 0xA4CF) ||
+		(r >= 0xAC00 && r <= 0xD7AF) ||
+		(r >= 0xF900 && r <= 0xFAFF) ||
+		(r >= 0xFE10 && r <= 0xFE1F) ||
+		(r >= 0xFE30 && r <= 0xFE4F) ||
+		(r >= 0xFF01 && r <= 0xFF60) ||
+		(r >= 0xFFE0 && r <= 0xFFE6)
+}
+
+// visibleLen returns the display column width of s, ignoring ANSI escape codes
+// and counting wide (CJK/Hangul) characters as 2 columns.
 func visibleLen(s string) int {
 	n := 0
 	inEsc := false
@@ -138,22 +155,56 @@ func visibleLen(s string) int {
 		} else if r == '\033' {
 			inEsc = true
 		} else {
-			n++
+			if isWideChar(r) {
+				n += 2
+			} else {
+				n++
+			}
 		}
 	}
 	return n
 }
 
-// padRight pads s to exactly width visible characters (truncating if needed)
+// truncateVisible truncates s to at most maxVisible display columns, passing
+// ANSI escape sequences through intact and appending Reset to close any open
+// colour sequences.
+func truncateVisible(s string, maxVisible int) string {
+	var b strings.Builder
+	visible := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			b.WriteRune(r)
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\033' {
+			inEsc = true
+			b.WriteRune(r)
+			continue
+		}
+		w := 1
+		if isWideChar(r) {
+			w = 2
+		}
+		if visible+w > maxVisible {
+			break
+		}
+		visible += w
+		b.WriteRune(r)
+	}
+	b.WriteString(Reset)
+	return b.String()
+}
+
+// padRight pads s to exactly width visible columns (truncating if needed).
+// ANSI colour codes are preserved when truncating.
 func padRight(s string, width int) string {
 	vl := visibleLen(s)
 	if vl >= width {
-		// Truncate (strip ANSI for safety, then re-add)
-		plain := stripAnsi(s)
-		if len(plain) > width-3 && width > 3 {
-			return plain[:width-3] + "..."
-		}
-		return plain[:min(len(plain), width)]
+		return truncateVisible(s, width)
 	}
 	return s + strings.Repeat(" ", width-vl)
 }

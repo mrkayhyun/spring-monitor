@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,19 +23,47 @@ const (
 	stateKill
 )
 
+type sortField int
+
+const (
+	sortByName sortField = iota
+	sortByMemory
+	sortByUptime
+	sortByPort
+)
+
 // App is the main TUI application
 type App struct {
-	term      *Terminal
-	version   string
-	mu        sync.Mutex
+	term     *Terminal
+	version  string
+	mu       sync.Mutex
+	redrawCh chan struct{}
 
 	state     appState
 	processes []*process.SpringProcess
 	selected  int
 
-	logViewer  *LogViewer
+	logViewer *LogViewer
+
+	describeTarget     *process.SpringProcess
+	describeMetrics    *actuator.Metrics
+	describeInfo       *actuator.AppInfo
+	describeLoading    bool
+	describeGeneration uint64
+
 	killTarget *process.SpringProcess
 	killInfo   *actuator.Info
+
+	// log search input mode
+	searchMode  bool
+	searchInput string
+
+	// sort state
+	sortBy   sortField
+	sortDesc bool
+
+	// last refresh time
+	lastRefresh time.Time
 
 	statusMsg string
 	statusErr bool
@@ -42,8 +71,9 @@ type App struct {
 
 func NewApp(version string) *App {
 	return &App{
-		term:    NewTerminal(),
-		version: version,
+		term:     NewTerminal(),
+		version:  version,
+		redrawCh: make(chan struct{}, 1),
 	}
 }
 
@@ -65,10 +95,89 @@ func (a *App) Cleanup() {
 func (a *App) setProcesses(procs []*process.SpringProcess) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	selectedPID := a.selectedPIDLocked()
+	a.sortProcesses(procs)
 	a.processes = procs
-	if a.selected >= len(procs) {
-		a.selected = max(0, len(procs)-1)
+	a.restoreSelectionLocked(selectedPID)
+	a.lastRefresh = time.Now()
+}
+
+func (a *App) selectedPIDLocked() int {
+	if a.selected >= 0 && a.selected < len(a.processes) {
+		return a.processes[a.selected].PID
 	}
+	return 0
+}
+
+func (a *App) restoreSelectionLocked(pid int) {
+	if pid != 0 {
+		for i, proc := range a.processes {
+			if proc.PID == pid {
+				a.selected = i
+				return
+			}
+		}
+	}
+	if a.selected >= len(a.processes) {
+		a.selected = max(0, len(a.processes)-1)
+	}
+}
+
+// sortProcesses sorts procs in-place according to a.sortBy / a.sortDesc.
+// Must be called with a.mu held.
+func (a *App) sortProcesses(procs []*process.SpringProcess) {
+	sort.SliceStable(procs, func(i, j int) bool {
+		left, right := procs[i], procs[j]
+		cmp := 0
+		switch a.sortBy {
+		case sortByMemory:
+			cmp = compareInt64(left.MemoryMB, right.MemoryMB)
+		case sortByUptime:
+			// A newer start time means a shorter uptime.
+			cmp = -left.StartTime.Compare(right.StartTime)
+		case sortByPort:
+			cmp = compareInt(firstPort(left), firstPort(right))
+		default: // sortByName
+			cmp = strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+		}
+		if cmp == 0 {
+			cmp = strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+		}
+		if cmp == 0 {
+			cmp = compareInt(left.PID, right.PID)
+		}
+		if a.sortDesc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func firstPort(proc *process.SpringProcess) int {
+	if len(proc.Ports) == 0 {
+		return 0
+	}
+	return proc.Ports[0]
+}
+
+func compareInt(left, right int) int {
+	if left < right {
+		return -1
+	}
+	if left > right {
+		return 1
+	}
+	return 0
+}
+
+func compareInt64(left, right int64) int {
+	if left < right {
+		return -1
+	}
+	if left > right {
+		return 1
+	}
+	return 0
 }
 
 func (a *App) setStatus(msg string, isErr bool) {
@@ -76,8 +185,16 @@ func (a *App) setStatus(msg string, isErr bool) {
 	a.statusErr = isErr
 }
 
+func (a *App) requestRender() {
+	select {
+	case a.redrawCh <- struct{}{}:
+	default:
+	}
+}
+
 // Run starts the main event loop
 func (a *App) Run(initialProcs []*process.SpringProcess) {
+	a.lastRefresh = time.Now()
 	a.setProcesses(initialProcs)
 
 	keyCh := make(chan int, 8)
@@ -110,10 +227,19 @@ func (a *App) Run(initialProcs []*process.SpringProcess) {
 		}
 	}()
 
-	// Also enrich initial processes with actuator health in background
+	// Enrich copies of the initial processes so the visible slice is never
+	// mutated concurrently with rendering.
 	go func() {
-		enrichWithActuator(initialProcs)
-		a.render()
+		enriched := make([]*process.SpringProcess, len(initialProcs))
+		for i, proc := range initialProcs {
+			clone := *proc
+			enriched[i] = &clone
+		}
+		enrichWithActuator(enriched)
+		select {
+		case procRefreshCh <- enriched:
+		default:
+		}
 	}()
 
 	a.render()
@@ -145,6 +271,9 @@ func (a *App) Run(initialProcs []*process.SpringProcess) {
 				}
 				a.render()
 			}
+
+		case <-a.redrawCh:
+			a.render()
 
 		case <-sigwinch:
 			a.term.Refresh()
@@ -189,28 +318,27 @@ func (a *App) handleListKey(key int) bool {
 
 	case 'd':
 		if len(procs) > 0 {
-			a.state = stateDescribe
-			// Probe actuator in background
-			go func(proc *process.SpringProcess) {
-				url := proc.ActuatorURL()
-				if url == "" {
-					proc.ActuatorStatus = process.ActuatorDisabled
-					return
-				}
-				info, _ := actuator.Check(url)
-				if info != nil && info.Available {
-					proc.ActuatorStatus = process.ActuatorEnabled
-				} else {
-					proc.ActuatorStatus = process.ActuatorDisabled
-				}
-				a.render()
-			}(procs[a.selected])
+			a.openDescribe(procs[a.selected])
 		}
 
 	case 'K':
 		if len(procs) > 0 {
 			a.openKill(procs[a.selected])
 		}
+
+	case 's':
+		a.mu.Lock()
+		selectedPID := a.selectedPIDLocked()
+		if a.sortDesc {
+			// cycle: asc → desc → next field asc
+			a.sortBy = (a.sortBy + 1) % 4
+			a.sortDesc = false
+		} else {
+			a.sortDesc = true
+		}
+		a.sortProcesses(a.processes)
+		a.restoreSelectionLocked(selectedPID)
+		a.mu.Unlock()
 
 	case 'r':
 		procs, err := process.Scan()
@@ -226,13 +354,79 @@ func (a *App) handleListKey(key int) bool {
 
 func (a *App) handleLogKey(key int) bool {
 	lv := a.logViewer
+
+	// Search input mode: collect characters until Enter or ESC
+	if a.searchMode {
+		switch key {
+		case KeyEnter:
+			a.searchMode = false
+			if lv != nil {
+				lv.SetSearch(a.searchInput)
+				if idx := lv.SearchNext(); idx >= 0 {
+					lv.mu.Lock()
+					displayH := a.term.Height - 3
+					if idx < lv.offset || idx >= lv.offset+displayH {
+						lv.offset = max(0, idx-displayH/2)
+					}
+					lv.mu.Unlock()
+				}
+			}
+		case KeyEsc:
+			a.searchMode = false
+			a.searchInput = ""
+			if lv != nil {
+				lv.ClearSearch()
+			}
+		case 127, 8: // Backspace
+			if len(a.searchInput) > 0 {
+				a.searchInput = a.searchInput[:len(a.searchInput)-1]
+			}
+		default:
+			if key >= 32 && key < 127 {
+				a.searchInput += string(rune(key))
+			}
+		}
+		// Re-render search bar (show input as it's typed)
+		a.renderSearchBar()
+		return true
+	}
+
 	switch key {
 	case 'q', KeyEsc:
 		if lv != nil {
 			lv.Stop()
 			a.logViewer = nil
 		}
+		a.searchMode = false
+		a.searchInput = ""
 		a.state = stateList
+
+	case '/':
+		a.searchMode = true
+		a.searchInput = ""
+
+	case 'n':
+		if lv != nil && lv.IsSearchActive() {
+			if idx := lv.SearchNext(); idx >= 0 {
+				lv.mu.Lock()
+				displayH := a.term.Height - 3
+				if idx < lv.offset || idx >= lv.offset+displayH {
+					lv.offset = max(0, idx-displayH/2)
+				}
+				lv.mu.Unlock()
+			}
+		}
+	case 'N':
+		if lv != nil && lv.IsSearchActive() {
+			if idx := lv.SearchPrev(); idx >= 0 {
+				lv.mu.Lock()
+				displayH := a.term.Height - 3
+				if idx < lv.offset || idx >= lv.offset+displayH {
+					lv.offset = max(0, idx-displayH/2)
+				}
+				lv.mu.Unlock()
+			}
+		}
 
 	case 'f':
 		if lv != nil {
@@ -258,7 +452,7 @@ func (a *App) handleLogKey(key int) bool {
 		}
 	case 'g':
 		if lv != nil {
-			lv.offset = 0
+			lv.ScrollToTop()
 		}
 	case 'G':
 		if lv != nil {
@@ -268,10 +462,28 @@ func (a *App) handleLogKey(key int) bool {
 	return true
 }
 
+// renderSearchBar redraws only the second row and status bar during search input,
+// to give live feedback without a full re-render.
+func (a *App) renderSearchBar() {
+	w := a.term.Width
+	h := a.term.Height
+	MoveTo(2, 1)
+	fmt.Print(BgGray + Dim + padRight(fmt.Sprintf(" Search: %s%s%s_", Bold, a.searchInput, Reset+BgGray+Dim), w) + Reset)
+	MoveTo(h, 1)
+	fmt.Print(BgBlack + White + padRight(" Type search query, Enter to confirm, ESC to cancel", w) + Reset)
+}
+
 func (a *App) handleDescribeKey(key int) bool {
 	switch key {
 	case 'q', KeyEsc, 'b':
+		a.mu.Lock()
 		a.state = stateList
+		a.describeTarget = nil
+		a.describeMetrics = nil
+		a.describeInfo = nil
+		a.describeLoading = false
+		a.describeGeneration++
+		a.mu.Unlock()
 	}
 	return true
 }
@@ -326,6 +538,60 @@ func (a *App) handleKillKey(key int) bool {
 	return true
 }
 
+func (a *App) openDescribe(proc *process.SpringProcess) {
+	a.mu.Lock()
+	a.state = stateDescribe
+	a.describeTarget = proc
+	a.describeMetrics = nil
+	a.describeInfo = nil
+	a.describeLoading = proc.ActuatorURL() != ""
+	a.describeGeneration++
+	generation := a.describeGeneration
+	a.mu.Unlock()
+
+	url := proc.ActuatorURL()
+	if url == "" {
+		proc.ActuatorStatus = process.ActuatorDisabled
+		return
+	}
+
+	go func() {
+		actuatorInfo, _ := actuator.Check(url)
+		var metrics *actuator.Metrics
+		var appInfo *actuator.AppInfo
+		if actuatorInfo != nil && actuatorInfo.Available {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				metrics, _ = actuator.GetMetrics(url)
+			}()
+			go func() {
+				defer wg.Done()
+				appInfo, _ = actuator.GetInfo(url)
+			}()
+			wg.Wait()
+		}
+
+		a.mu.Lock()
+		if a.describeTarget != proc || a.describeGeneration != generation {
+			a.mu.Unlock()
+			return
+		}
+		if actuatorInfo != nil && actuatorInfo.Available {
+			proc.ActuatorStatus = process.ActuatorEnabled
+			proc.HealthStatus = actuatorInfo.Health
+		} else {
+			proc.ActuatorStatus = process.ActuatorDisabled
+		}
+		a.describeMetrics = metrics
+		a.describeInfo = appInfo
+		a.describeLoading = false
+		a.mu.Unlock()
+		a.requestRender()
+	}()
+}
+
 func (a *App) openLog(proc *process.SpringProcess) {
 	logFile := proc.FindLogFile()
 	if logFile == "" {
@@ -356,9 +622,13 @@ func (a *App) openKill(proc *process.SpringProcess) {
 		}
 		info, _ := actuator.Check(url)
 		a.mu.Lock()
+		if a.killTarget != proc {
+			a.mu.Unlock()
+			return
+		}
 		a.killInfo = info
 		a.mu.Unlock()
-		a.render()
+		a.requestRender()
 	}()
 }
 
@@ -371,6 +641,9 @@ func (a *App) render() {
 	case stateLog:
 		if a.logViewer != nil {
 			a.logViewer.Render(a.term, a.logViewer.ProcName, a.logViewer.PID)
+			if a.searchMode {
+				a.renderSearchBar()
+			}
 		}
 	case stateDescribe:
 		a.renderDescribe()
@@ -388,15 +661,28 @@ func (a *App) renderList() {
 	MoveTo(1, 1)
 	now := time.Now().Format("15:04:05")
 	right := fmt.Sprintf(" %s ", now)
-	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill  d:describe  r:refresh  ↑↓jk:nav", a.version)
-	// padRight makes left exactly (w - len(right)) wide, so total = w
+	left := fmt.Sprintf(" spring-monitor %s  │  q:quit  l:logs  K:kill  d:describe  s:sort  r:refresh  ↑↓jk:nav", a.version)
 	header := padRight(left, w-visibleLen(right)) + right
 	fmt.Print(BgBlue + Bold + White + header + Reset)
 
-	// ── Row 2: Column headers ───────────────────────────────────────────────
+	// ── Row 2: Column headers (highlight active sort column) ────────────────
 	MoveTo(2, 1)
+	sortArrow := func(f sortField, label string) string {
+		if a.sortBy == f {
+			arrow := "↑"
+			if a.sortDesc {
+				arrow = "↓"
+			}
+			return Bold + label + arrow + Reset + BgGray
+		}
+		return label
+	}
 	colHeader := fmt.Sprintf("  %-20s %-7s %-10s %-8s %-7s %-5s %-10s %-8s  %s",
-		"NAME", "PID", "PORT(S)", "UPTIME", "MEM(MB)", "JAVA", "PROFILE", "HEALTH", "ACTUATOR")
+		sortArrow(sortByName, "NAME"), "PID",
+		sortArrow(sortByPort, "PORT(S)"),
+		sortArrow(sortByUptime, "UPTIME"),
+		sortArrow(sortByMemory, "MEM(MB)"),
+		"JAVA", "PROFILE", "HEALTH", "ACTUATOR")
 	fmt.Print(BgGray + Bold + padRight(colHeader, w) + Reset)
 
 	// ── Rows 3..h-1: Process rows ───────────────────────────────────────────
@@ -423,7 +709,10 @@ func (a *App) renderList() {
 	if a.statusMsg != "" {
 		plain += "  │  " + a.statusMsg
 	}
-	// padRight on plain text first, then wrap entire line in colour
+	if !a.lastRefresh.IsZero() {
+		elapsed := time.Since(a.lastRefresh).Round(time.Second)
+		plain += fmt.Sprintf("  │  refreshed %s ago", elapsed)
+	}
 	fmt.Print(BgBlack + White + padRight(plain, w) + Reset)
 }
 
@@ -500,13 +789,21 @@ func (a *App) renderDescribe() {
 	h := a.term.Height
 	Clear()
 
-	procs := a.processes
-	if a.selected >= len(procs) {
+	a.mu.Lock()
+	var proc *process.SpringProcess
+	if a.describeTarget != nil {
+		snapshot := *a.describeTarget
+		proc = &snapshot
+	}
+	metrics := a.describeMetrics
+	appInfo := a.describeInfo
+	loading := a.describeLoading
+	a.mu.Unlock()
+	if proc == nil {
 		a.state = stateList
 		a.render()
 		return
 	}
-	proc := procs[a.selected]
 
 	// Header
 	MoveTo(1, 1)
@@ -516,12 +813,18 @@ func (a *App) renderDescribe() {
 
 	row := 3
 	printField := func(label, value string) {
+		if row >= h {
+			return
+		}
 		MoveTo(row, 1)
 		fmt.Print(padRight(fmt.Sprintf("  %-20s %s", label, value), w))
 		row++
 	}
 	printSection := func(title string) {
 		row++
+		if row >= h {
+			return
+		}
 		MoveTo(row, 1)
 		fmt.Print(Bold + Cyan + padRight(" "+title, w) + Reset)
 		row++
@@ -571,16 +874,82 @@ func (a *App) renderDescribe() {
 		printField("URL:", url)
 		switch proc.ActuatorStatus {
 		case process.ActuatorEnabled:
-			healthVal := proc.HealthStatus
-			if healthVal == "" {
-				healthVal = "checking..."
-			}
 			printField("Status:", Green+"✓ Enabled"+Reset)
-			printField("Health:", healthStr(proc.HealthStatus))
+			if proc.HealthStatus == "" {
+				printField("Health:", Dim+"not exposed"+Reset)
+			} else {
+				printField("Health:", healthStr(proc.HealthStatus))
+			}
 		case process.ActuatorDisabled:
 			printField("Status:", Red+"✗ Not available"+Reset)
 		default:
 			printField("Status:", Yellow+"? Probing..."+Reset)
+		}
+
+		if loading {
+			printField("Metrics:", Yellow+"loading..."+Reset)
+		} else if metrics != nil && metrics.Available {
+			if metrics.HeapUsedAvailable || metrics.HeapMaxAvailable {
+				heap := ""
+				if metrics.HeapUsedAvailable {
+					heap = fmt.Sprintf("%.1f MB used", metrics.HeapUsedMB)
+				}
+				if metrics.HeapMaxAvailable {
+					if heap != "" {
+						heap += fmt.Sprintf(" / %.1f MB", metrics.HeapMaxMB)
+						if metrics.HeapMaxMB > 0 {
+							heap += fmt.Sprintf(" (%.1f%%)", metrics.HeapUsedMB/metrics.HeapMaxMB*100)
+						}
+					} else {
+						heap = fmt.Sprintf("%.1f MB max", metrics.HeapMaxMB)
+					}
+				}
+				printField("JVM Heap:", heap)
+			}
+			if metrics.NonHeapAvailable {
+				printField("JVM Non-heap:", fmt.Sprintf("%.1f MB", metrics.NonHeapMB))
+			}
+			if metrics.ThreadsAvailable {
+				printField("JVM Threads:", fmt.Sprintf("%d live", metrics.ThreadCount))
+			}
+			if metrics.HTTPAvailable {
+				httpParts := []string{fmt.Sprintf("%d total", metrics.HTTPRequestCount)}
+				if metrics.HTTPErrorAvailable {
+					httpParts = append(httpParts, fmt.Sprintf("%d server errors", metrics.HTTPErrorCount))
+				}
+				httpParts = append(httpParts, fmt.Sprintf("%.1f ms avg", metrics.HTTPAvgDurationMs))
+				printField("HTTP Requests:", strings.Join(httpParts, "  │  "))
+			}
+		} else if proc.ActuatorStatus == process.ActuatorEnabled {
+			printField("Metrics:", Dim+"not exposed"+Reset)
+		}
+	}
+
+	if !loading && appInfo != nil && (appInfo.AppVersion != "" || appInfo.BuildTime != "" ||
+		appInfo.GitBranch != "" || appInfo.GitCommit != "" || len(appInfo.Extra) > 0) {
+		printSection("Application")
+		if appInfo.AppVersion != "" {
+			printField("Version:", appInfo.AppVersion)
+		}
+		if appInfo.BuildTime != "" {
+			printField("Build Time:", appInfo.BuildTime)
+		}
+		if appInfo.GitBranch != "" {
+			printField("Git Branch:", appInfo.GitBranch)
+		}
+		if appInfo.GitCommit != "" {
+			printField("Git Commit:", appInfo.GitCommit)
+		}
+		keys := make([]string, 0, len(appInfo.Extra))
+		for key := range appInfo.Extra {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if row >= h-1 {
+				break
+			}
+			printField(key+":", appInfo.Extra[key])
 		}
 	}
 

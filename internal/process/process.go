@@ -33,7 +33,7 @@ func isKnownNonSpringJava(cmdStr string) bool {
 type ActuatorStatus int
 
 const (
-	ActuatorUnknown  ActuatorStatus = iota
+	ActuatorUnknown ActuatorStatus = iota
 	ActuatorEnabled
 	ActuatorDisabled
 )
@@ -100,12 +100,12 @@ func (p *SpringProcess) ActuatorURL() string {
 	return fmt.Sprintf("http://localhost:%d%s", p.ActuatorPort, base)
 }
 
-// FindLogFile locates the log file for this process
+// FindLogFile locates the log file for this process.
+// If a log path was explicitly configured via JVM args, it is always returned
+// (even if the file doesn't exist yet — the app may not have written to it yet).
 func (p *SpringProcess) FindLogFile() string {
 	if p.LogFile != "" {
-		if fileExists(p.LogFile) {
-			return p.LogFile
-		}
+		return p.LogFile
 	}
 	var candidates []string
 	if p.WorkingDir != "" {
